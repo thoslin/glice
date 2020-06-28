@@ -4,18 +4,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/csv"
 	"flag"
+	"github.com/fatih/color"
+	"github.com/olekukonko/tablewriter"
+	"github.com/ribice/glice/api"
 	"go/build"
+	"golang.org/x/mod/modfile"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/fatih/color"
-	"github.com/olekukonko/tablewriter"
-	"github.com/ribice/glice/api"
 )
 
 const (
@@ -25,12 +27,14 @@ const (
 )
 
 type dep struct {
-	name  string
-	count int
-	repo  *api.Repository
+	name    string
+	version string
+	count   int
+	repo    *api.Repository
 }
 
 type deps struct {
+	fullPath  string
 	deps      []dep
 	baseDir   string
 	depth     string
@@ -54,6 +58,8 @@ func main() {
 		path       = flag.String("p", "", `Path of desired directory to be scanned with Glice (e.g. "github.com/ribice/glice/")`)
 		thx        = flag.Bool("t", false, "Stars dependent repos.")
 		count      = flag.Bool("c", false, "Include usage count in exported result")
+		printCSV   = flag.Bool("csv", false, "Print licenses as csv")
+		mod        = flag.Bool("mod", true, "Parse dependency from go.mod")
 		depth      = "Imports"
 		apiKeys    = map[string]string{}
 	)
@@ -78,8 +84,12 @@ func main() {
 		depth:     depth,
 	}
 
-	for _, v := range getFolders(fullPath, *ignoreDirs) {
-		ds.getDeps(v)
+	if *mod {
+		ds.getDepsFromGoMod(fullPath)
+	} else {
+		for _, v := range getFolders(fullPath, *ignoreDirs) {
+			ds.getDeps(v)
+		}
 	}
 
 	if *ghkey != "" {
@@ -89,10 +99,14 @@ func main() {
 	ds.cl = api.NewGitClient(c, apiKeys, *thx)
 	ds.getLicenses(c)
 
-	tw := tablewriter.NewWriter(os.Stdout)
-	ds.writeStd(tw)
-	tw.Render()
-	checkErr(ds.writeLicensesToFile(fullPath))
+	if *printCSV {
+		ds.printCsv()
+	} else {
+		tw := tablewriter.NewWriter(os.Stdout)
+		ds.writeStd(tw)
+		tw.Render()
+		checkErr(ds.writeLicensesToFile(fullPath))
+	}
 }
 
 func getCurrentFolder(path string) string {
@@ -143,6 +157,26 @@ func skipHidden(name string) bool {
 	return false
 }
 
+func (ds *deps) getDepsFromGoMod(path string) {
+	modPath := path + "go.mod"
+	b, err := ioutil.ReadFile(modPath)
+	if err != nil {
+		panic(err)
+	}
+
+	f, err := modfile.Parse(modPath, b, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, r := range f.Require {
+		d := ds.exists(r.Mod.Path, r.Mod.Version, ds.verbose)
+		if d != nil {
+			ds.deps = append(ds.deps, *d)
+		}
+	}
+}
+
 func (ds *deps) getDeps(dirname string) {
 	// used for comparing dependency with current project minus the file separator
 	if dirname == "."+fs {
@@ -159,7 +193,7 @@ func (ds *deps) getDeps(dirname string) {
 	checkErr(cmd.Start())
 	s := bufio.NewScanner(stdout)
 	for s.Scan() {
-		if d := ds.exists(s.Text(), ds.verbose); d != nil {
+		if d := ds.exists(s.Text(), "", ds.verbose); d != nil {
 			if len(d.name) >= ds.bdl && d.name[0:ds.bdl]+fs == ds.baseDir {
 				continue
 			}
@@ -168,7 +202,7 @@ func (ds *deps) getDeps(dirname string) {
 	}
 }
 
-func (ds *deps) exists(s string, verbose bool) *dep {
+func (ds *deps) exists(s string, version string, verbose bool) *dep {
 	if strings.Contains(s, "vendor"+fs) {
 		s = strings.Split(s, "vendor"+fs)[1]
 	}
@@ -186,7 +220,7 @@ func (ds *deps) exists(s string, verbose bool) *dep {
 		}
 	}
 
-	return &dep{name: s, repo: l}
+	return &dep{name: s, version: version, repo: l}
 }
 
 func getRepoURL(s *string, verbose bool) *api.Repository {
@@ -231,6 +265,17 @@ func (ds *deps) writeStd(tw *tablewriter.Table) {
 			vals = append(vals, strconv.Itoa(v.count+1))
 		}
 		tw.Append(vals)
+	}
+}
+
+func (ds *deps) printCsv() {
+	writer := csv.NewWriter(os.Stdout)
+	defer writer.Flush()
+
+	checkErr(writer.Write([]string{"Dependency", "Version", "RepoURL", "License", "License URL"}))
+
+	for _, v := range ds.deps {
+		checkErr(writer.Write([]string{v.name, v.version, v.repo.URL, v.repo.Shortname, v.repo.LicenseURL}))
 	}
 }
 

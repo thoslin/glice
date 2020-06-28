@@ -55,6 +55,7 @@ type Repository struct {
 	Shortname   string
 	fullLicense string
 	URL         string
+	LicenseURL  string
 	Exists      bool
 	Host        string
 	Author      string
@@ -103,6 +104,7 @@ func (r *Repository) GetLicenses(c context.Context, gc *GitClient) {
 			}
 			r.Shortname = color.New(clr).Sprintf(name)
 			r.Text = rl.GetContent()
+			r.LicenseURL = *rl.URL
 		} else {
 			log.Printf("Error getting license for %s: %v", r.Host, err)
 		}
